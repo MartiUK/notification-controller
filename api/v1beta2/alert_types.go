@@ -20,7 +20,7 @@ import (
 	"github.com/fluxcd/pkg/apis/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/fluxcd/notification-controller/api/v1"
+	v1 "github.com/fluxcd/notification-controller/api/v1"
 )
 
 const (
@@ -88,10 +88,9 @@ type AlertStatus struct {
 }
 
 // +genclient
-// +genclient:Namespaced
-// +kubebuilder:storageversion
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:deprecatedversion:warning="v1beta2 Alert is deprecated, upgrade to v1beta3"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description=""
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].message",description=""

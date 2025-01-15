@@ -134,6 +134,7 @@ handle the incoming webhook request.
 | [Nexus](#nexus)                            | `nexus`        | ❌                                          |
 | [Azure Container Registry](#acr)           | `acr`          | ❌                                          |
 | [Google Container Registry](#gcr)          | `gcr`          | ❌                                          |
+| [CDEvents](#cdevents)                      | `cdevents`     | ✅                                          |
 
 #### Generic
 
@@ -281,7 +282,7 @@ type](#github) compatible [webhook event payloads](https://docs.gitea.io/en-us/w
 
 **Note:** While the payloads are compatible with the GitHub type, the number of
 available events may be limited and/or different from the ones available in
-GitHub. Refer to the [Gitea source code](https://github.com/go-gitea/gitea/blob/main/models/webhook/hooktask.go#L28)
+GitHub. Refer to the [Gitea source code](https://github.com/go-gitea/gitea/blob/v1.19.4/modules/webhook/type.go#L10)
 to see the list of available [events](#events).
 
 #### GitLab
@@ -610,6 +611,35 @@ spec:
     name: webhook-token
   resources:
     - kind: ImageRepository
+      name: webapp
+```
+
+#### CDEvents
+
+When a Receiver's `.spec.type` is set to `cdevents`, the controller will respond to
+a [CDEvent Event Payload](https://cdevents.dev/docs/). It will verify the CDEvent
+using the [CDEvent Go-SDK](https://github.com/cdevents/sdk-go). 
+
+This type of receiver supports filtering using [Events](#events) by comparing the
+`type` header to the list of events. 
+
+##### CDEvents example
+
+```yaml
+---
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Receiver
+metadata:
+  name: cdevents-receiver
+  namespace: flux-system
+spec:
+  type: cdevents
+  events:
+    - "dev.cdevents.change.merged"
+  secretRef:
+    name: receiver-token
+  resources:
+    - kind: GitRepository 
       name: webapp
 ```
 

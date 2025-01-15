@@ -26,13 +26,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	kuberecorder "k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/runtime/conditions"
@@ -54,7 +55,7 @@ type ReceiverReconciler struct {
 }
 
 type ReceiverReconcilerOptions struct {
-	RateLimiter ratelimiter.RateLimiter
+	RateLimiter workqueue.TypedRateLimiter[reconcile.Request]
 }
 
 func (r *ReceiverReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -112,9 +113,7 @@ func (r *ReceiverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 
 		// Record Prometheus metrics.
-		r.Metrics.RecordReadiness(ctx, obj)
 		r.Metrics.RecordDuration(ctx, obj, reconcileStart)
-		r.Metrics.RecordSuspend(ctx, obj, obj.Spec.Suspend)
 
 		// Emit warning event if the reconciliation failed.
 		if retErr != nil {
@@ -129,15 +128,19 @@ func (r *ReceiverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}()
 
-	if !controllerutil.ContainsFinalizer(obj, apiv1.NotificationFinalizer) {
-		controllerutil.AddFinalizer(obj, apiv1.NotificationFinalizer)
-		result = ctrl.Result{Requeue: true}
-		return
-	}
-
 	if !obj.ObjectMeta.DeletionTimestamp.IsZero() {
 		controllerutil.RemoveFinalizer(obj, apiv1.NotificationFinalizer)
 		result = ctrl.Result{}
+		return
+	}
+
+	// Add finalizer first if not exist to avoid the race condition
+	// between init and delete.
+	// Note: Finalizers in general can only be added when the deletionTimestamp
+	// is not set.
+	if !controllerutil.ContainsFinalizer(obj, apiv1.NotificationFinalizer) {
+		controllerutil.AddFinalizer(obj, apiv1.NotificationFinalizer)
+		result = ctrl.Result{Requeue: true}
 		return
 	}
 
@@ -158,7 +161,7 @@ func (r *ReceiverReconciler) reconcile(ctx context.Context, obj *apiv1.Receiver)
 
 	token, err := r.token(ctx, obj)
 	if err != nil {
-		conditions.MarkFalse(obj, meta.ReadyCondition, apiv1.TokenNotFoundReason, err.Error())
+		conditions.MarkFalse(obj, meta.ReadyCondition, apiv1.TokenNotFoundReason, "%s", err)
 		obj.Status.WebhookPath = ""
 		return ctrl.Result{Requeue: true}, err
 	}
@@ -167,7 +170,7 @@ func (r *ReceiverReconciler) reconcile(ctx context.Context, obj *apiv1.Receiver)
 	msg := fmt.Sprintf("Receiver initialized for path: %s", webhookPath)
 
 	// Mark the resource as ready and set the webhook path in status.
-	conditions.MarkTrue(obj, meta.ReadyCondition, meta.SucceededReason, msg)
+	conditions.MarkTrue(obj, meta.ReadyCondition, meta.SucceededReason, "%s", msg)
 
 	if obj.Status.WebhookPath != webhookPath {
 		obj.Status.WebhookPath = webhookPath

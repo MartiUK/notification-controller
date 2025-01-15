@@ -313,7 +313,10 @@ string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Address specifies the HTTP/S incoming webhook address of this Provider.</p>
+<p>Address specifies the endpoint, in a generic sense, to where alerts are sent.
+What kind of endpoint depends on the specific Provider type being used.
+For the generic Provider, for example, this is an HTTP/S address.
+For other Provider types this could be a project ID or a namespace.</p>
 </td>
 </tr>
 <tr>
@@ -369,7 +372,9 @@ github.com/fluxcd/pkg/apis/meta.LocalObjectReference
 <td>
 <em>(Optional)</em>
 <p>CertSecretRef specifies the Secret containing
-a PEM-encoded CA certificate (<code>caFile</code>).</p>
+a PEM-encoded CA certificate (in the <code>ca.crt</code> key).</p>
+<p>Note: Support for the <code>caFile</code> key has
+been deprecated.</p>
 </td>
 </tr>
 <tr>
@@ -902,7 +907,10 @@ string
 </td>
 <td>
 <em>(Optional)</em>
-<p>Address specifies the HTTP/S incoming webhook address of this Provider.</p>
+<p>Address specifies the endpoint, in a generic sense, to where alerts are sent.
+What kind of endpoint depends on the specific Provider type being used.
+For the generic Provider, for example, this is an HTTP/S address.
+For other Provider types this could be a project ID or a namespace.</p>
 </td>
 </tr>
 <tr>
@@ -958,7 +966,9 @@ github.com/fluxcd/pkg/apis/meta.LocalObjectReference
 <td>
 <em>(Optional)</em>
 <p>CertSecretRef specifies the Secret containing
-a PEM-encoded CA certificate (<code>caFile</code>).</p>
+a PEM-encoded CA certificate (in the <code>ca.crt</code> key).</p>
+<p>Note: Support for the <code>caFile</code> key has
+been deprecated.</p>
 </td>
 </tr>
 <tr>

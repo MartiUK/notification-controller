@@ -31,10 +31,12 @@ import (
 	"strings"
 	"time"
 
+	cdevents "github.com/cdevents/sdk-go/pkg/api"
+	cdevents04 "github.com/cdevents/sdk-go/pkg/api/v04"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	"github.com/go-logr/logr"
-	"github.com/google/go-github/v53/github"
+	"github.com/google/go-github/v64/github"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -50,9 +52,9 @@ var (
 
 // defaultFluxAPIVersions is a map of Flux API kinds to their API versions.
 var defaultFluxAPIVersions = map[string]string{
-	"Bucket":          "source.toolkit.fluxcd.io/v1beta2",
-	"HelmChart":       "source.toolkit.fluxcd.io/v1beta2",
-	"HelmRepository":  "source.toolkit.fluxcd.io/v1beta2",
+	"Bucket":          "source.toolkit.fluxcd.io/v1",
+	"HelmChart":       "source.toolkit.fluxcd.io/v1",
+	"HelmRepository":  "source.toolkit.fluxcd.io/v1",
 	"GitRepository":   "source.toolkit.fluxcd.io/v1",
 	"OCIRepository":   "source.toolkit.fluxcd.io/v1beta2",
 	"ImageRepository": "image.toolkit.fluxcd.io/v1beta2",
@@ -71,7 +73,7 @@ func IndexReceiverWebhookPath(o client.Object) []string {
 func (s *ReceiverServer) handlePayload() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
-		digest := url.PathEscape(strings.TrimLeft(r.RequestURI, apiv1.ReceiverWebhookPath))
+		digest := url.PathEscape(strings.TrimPrefix(r.RequestURI, apiv1.ReceiverWebhookPath))
 
 		s.logger.Info(fmt.Sprintf("handling request: %s", digest))
 
@@ -164,7 +166,7 @@ func (s *ReceiverServer) validate(ctx context.Context, receiver apiv1.Receiver, 
 		if len(receiver.Spec.Events) > 0 {
 			allowed := false
 			for _, e := range receiver.Spec.Events {
-				if strings.ToLower(event) == strings.ToLower(e) {
+				if strings.EqualFold(event, e) {
 					allowed = true
 					break
 				}
@@ -185,7 +187,7 @@ func (s *ReceiverServer) validate(ctx context.Context, receiver apiv1.Receiver, 
 		if len(receiver.Spec.Events) > 0 {
 			allowed := false
 			for _, e := range receiver.Spec.Events {
-				if strings.ToLower(event) == strings.ToLower(e) {
+				if strings.EqualFold(event, e) {
 					allowed = true
 					break
 				}
@@ -197,6 +199,38 @@ func (s *ReceiverServer) validate(ctx context.Context, receiver apiv1.Receiver, 
 
 		logger.Info(fmt.Sprintf("handling GitLab event: %s", event))
 		return nil
+	case apiv1.CDEventsReceiver:
+		event := r.Header.Get("Ce-Type")
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			return fmt.Errorf("unable to read CDEvent request body: %s", err)
+		}
+
+		cdevent, err := cdevents04.NewFromJsonBytes(b)
+		if err != nil {
+			return fmt.Errorf("unable to validate CDEvent event: %s", err)
+		}
+
+		err = cdevents.Validate(cdevent)
+		if err != nil {
+			return fmt.Errorf("unable to validate CDEvent event: %s", err)
+		}
+
+		if len(receiver.Spec.Events) > 0 {
+			allowed := false
+			for _, e := range receiver.Spec.Events {
+				if strings.EqualFold(event, e) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("the CDEvent '%s' is not authorised", event)
+			}
+		}
+
+		logger.Info(fmt.Sprintf("handling CDEvent: %s", event))
+		return nil
 	case apiv1.BitbucketReceiver:
 		_, err := github.ValidatePayload(r, []byte(token))
 		if err != nil {
@@ -207,7 +241,7 @@ func (s *ReceiverServer) validate(ctx context.Context, receiver apiv1.Receiver, 
 		if len(receiver.Spec.Events) > 0 {
 			allowed := false
 			for _, e := range receiver.Spec.Events {
-				if strings.ToLower(event) == strings.ToLower(e) {
+				if strings.EqualFold(event, e) {
 					allowed = true
 					break
 				}
@@ -408,8 +442,8 @@ func (s *ReceiverServer) requestReconciliation(ctx context.Context, logger logr.
 			return nil
 		}
 
-		for _, resource := range resources.Items {
-			if err := s.annotate(ctx, &resource); err != nil {
+		for i, resource := range resources.Items {
+			if err := s.annotate(ctx, &resources.Items[i]); err != nil {
 				return fmt.Errorf("failed to annotate resource: '%s/%s.%s': %w", resource.Kind, resource.Name, namespace, err)
 			} else {
 				logger.Info(fmt.Sprintf("resource '%s/%s.%s' annotated",
@@ -482,12 +516,12 @@ func authenticateGCRRequest(c *http.Client, bearer string, tokenIndex int) (err 
 
 	resp, err := c.Get(url)
 	if err != nil {
-		return fmt.Errorf("Cannot verify authenticity of payload: %w", err)
+		return fmt.Errorf("cannot verify authenticity of payload: %w", err)
 	}
 
 	var p auth
 	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
-		return fmt.Errorf("Cannot decode auth payload: %w", err)
+		return fmt.Errorf("cannot decode auth payload: %w", err)
 	}
 
 	return nil

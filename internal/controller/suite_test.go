@@ -31,17 +31,20 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
-	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/fluxcd/cli-utils/pkg/kstatus/polling"
 	runtimeclient "github.com/fluxcd/pkg/runtime/client"
 	"github.com/fluxcd/pkg/runtime/controller"
+	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/testenv"
 	"github.com/fluxcd/pkg/ssa"
+	ssautil "github.com/fluxcd/pkg/ssa/utils"
 
 	apiv1 "github.com/fluxcd/notification-controller/api/v1"
 	apiv1b2 "github.com/fluxcd/notification-controller/api/v1beta2"
+	apiv1b3 "github.com/fluxcd/notification-controller/api/v1beta3"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -56,6 +59,7 @@ func TestMain(m *testing.M) {
 	var err error
 	utilruntime.Must(apiv1.AddToScheme(scheme.Scheme))
 	utilruntime.Must(apiv1b2.AddToScheme(scheme.Scheme))
+	utilruntime.Must(apiv1b3.AddToScheme(scheme.Scheme))
 
 	testEnv = testenv.New(testenv.WithCRDPath(
 		filepath.Join("..", "..", "config", "crd", "bases"),
@@ -67,27 +71,21 @@ func TestMain(m *testing.M) {
 	}
 
 	controllerName := "notification-controller"
-	testMetricsH := controller.MustMakeMetrics(testEnv)
+	testMetricsH := controller.NewMetrics(testEnv, metrics.MustMakeRecorder(), apiv1.NotificationFinalizer)
 
 	if err := (&AlertReconciler{
 		Client:         testEnv,
-		Metrics:        testMetricsH,
 		ControllerName: controllerName,
 		EventRecorder:  testEnv.GetEventRecorderFor(controllerName),
-	}).SetupWithManagerAndOptions(testEnv, AlertReconcilerOptions{
-		RateLimiter: controller.GetDefaultRateLimiter(),
-	}); err != nil {
-		panic(fmt.Sprintf("Failed to start AlerReconciler: %v", err))
+	}).SetupWithManager(testEnv); err != nil {
+		panic(fmt.Sprintf("Failed to start AlertReconciler: %v", err))
 	}
 
 	if err := (&ProviderReconciler{
 		Client:         testEnv,
-		Metrics:        testMetricsH,
 		ControllerName: controllerName,
 		EventRecorder:  testEnv.GetEventRecorderFor(controllerName),
-	}).SetupWithManagerAndOptions(testEnv, ProviderReconcilerOptions{
-		RateLimiter: controller.GetDefaultRateLimiter(),
-	}); err != nil {
+	}).SetupWithManager(testEnv); err != nil {
 		panic(fmt.Sprintf("Failed to start ProviderReconciler: %v", err))
 	}
 
@@ -158,7 +156,7 @@ func readManifest(manifest, namespace string) (*unstructured.Unstructured, error
 	}
 	yml := fmt.Sprintf(string(data), namespace)
 
-	object, err := ssa.ReadObject(strings.NewReader(yml))
+	object, err := ssautil.ReadObject(strings.NewReader(yml))
 	if err != nil {
 		return nil, err
 	}

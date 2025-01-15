@@ -109,6 +109,7 @@ The supported alerting providers are:
 | [Generic webhook](#generic-webhook)                     | `generic`        |
 | [Generic webhook with HMAC](#generic-webhook-with-hmac) | `generic-hmac`   |
 | [Azure Event Hub](#azure-event-hub)                     | `azureeventhub`  |
+| [DataDog](#datadog)                                     | `datadog`        |
 | [Discord](#discord)                                     | `discord`        |
 | [GitHub dispatch](#github-dispatch)                     | `githubdispatch` |
 | [Google Chat](#google-chat)                             | `googlechat`     |
@@ -128,13 +129,14 @@ The supported alerting providers are:
 
 The supported providers for [Git commit status updates](#git-commit-status-updates) are:
 
-| Provider                      | Type          |
-|-------------------------------|---------------|
-| [Azure DevOps](#azure-devops) | `azuredevops` |
-| [Bitbucket](#bitbucket)       | `bitbucket`   |
-| [GitHub](#github)             | `github`      |
-| [GitLab](#gitlab)             | `gitlab`      |
-| [Gitea](#gitea)               | `gitea`       |
+| Provider                                        | Type              |
+| ------------------------------------------------| ----------------- |
+| [Azure DevOps](#azure-devops)                   | `azuredevops`     |
+| [Bitbucket](#bitbucket)                         | `bitbucket`       |
+| [BitbucketServer](#bitbucket-serverdata-center) | `bitbucketserver` |
+| [GitHub](#github)                               | `github`          |
+| [GitLab](#gitlab)                               | `gitlab`          |
+| [Gitea](#gitea)                                 | `gitea`           |
 
 #### Alerting
 
@@ -268,7 +270,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Verify signature using the same token as the Secret referenced in
 	// Provider
-	key := "<token>"
+	key := []byte("<token>")
 	if err := verifySignature(r.Header.Get("X-Signature"), body, key); err != nil {
 		http.Error(w, fmt.Sprintf("failed to verify HMAC signature: %s", err.Error()), http.StatusBadRequest)
 		return
@@ -403,6 +405,62 @@ metadata:
   namespace: default
 stringData:
     address: "https://xxx.webhook.office.com/..."
+```
+
+##### DataDog
+
+When `.spec.type` is set to `datadog`, the controller will send a payload for
+an [Event](events.md#event-structure) to the provided DataDog API [Address](#address).
+
+The Event will be formatted into a [DataDog Event](https://docs.datadoghq.com/api/latest/events/#post-an-event) and sent to the
+API endpoint of the provided DataDog [Address](#address).
+
+This Provider type supports the configuration of a [proxy URL](#https-proxy)
+and/or [TLS certificates](#tls-certificates).
+
+The metadata of the Event is included in the DataDog event as extra tags.
+
+###### DataDog example
+
+To configure a Provider for DataDog, create a Secret with [the `token`](#token-example)
+set to a [DataDog API key](https://docs.datadoghq.com/account_management/api-app-keys/#api-keys)
+(not an application key!) and a `datadog` Provider with a [Secret reference](#secret-reference).
+
+```yaml
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta2
+kind: Provider
+metadata:
+  name: datadog
+  namespace: default
+spec:
+  type: datadog
+  address: https://api.datadoghq.com # DataDog Site US1
+  secretRef:
+    name: datadog-secret
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: datadog-secret
+  namespace: default
+stringData:
+  token: <DataDog API Key>
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta2
+kind: Alert
+metadata:
+  name: datadog-info
+  namespace: default
+spec:
+  eventSeverity: info
+  eventSources:
+    - kind: HelmRelease
+      name: "*"
+  providerRef:
+    name: datadog
+  eventMetadata:
+    env: my-k8s-cluster # example of adding a custom `env` tag to the event
 ```
 
 ##### Discord
@@ -936,7 +994,10 @@ stringData:
 
 ### Address
 
-`.spec.address` is an optional field that specifies the URL where the events are posted.
+`.spec.address` is an optional field that specifies the endpoint where the events are posted.
+The meaning of endpoint here depends on the specific Provider type being used.
+For the `generic` Provider for example this is an HTTP/S address.
+For other Provider types this could be a project ID or a namespace.
 
 If the address contains sensitive information such as tokens or passwords, it is 
 recommended to store the address in the Kubernetes secret referenced by `.spec.secretRef.name`.
@@ -1035,11 +1096,12 @@ stringData:
 
 `.spec.certSecretRef` is an optional field to specify a name reference to a
 Secret in the same namespace as the Provider, containing the TLS CA certificate.
+The secret must be of type `kubernetes.io/tls` or `Opaque`.
 
 #### Example
 
 To enable notification-controller to communicate with a provider API over HTTPS
-using a self-signed TLS certificate, set the `caFile` like so:
+using a self-signed TLS certificate, set the `ca.crt` like so:
 
 ```yaml
 ---
@@ -1059,10 +1121,15 @@ kind: Secret
 metadata:
   name: my-ca-crt
   namespace: default
+type: kubernetes.io/tls # or Opaque
 stringData:
-  caFile: |
+  ca.crt: |
     <--- CA Key --->
 ```
+
+**Warning:** Support for the `caFile` key has been
+deprecated. If you have any Secrets using this key,
+the controller will log a deprecation warning.
 
 ### HTTP/S proxy
 
@@ -1418,7 +1485,13 @@ kubectl create secret generic gitlab-token --from-literal=token=<GITLAB-TOKEN>
 When `.spec.type` is set to `gitea`, the referenced secret must contain a key called `token` with the value set to a
 [Gitea token](https://docs.gitea.io/en-us/api-usage/#generating-and-listing-api-tokens).
 
-The token owner must have permissions to update the commit status for the Gitea repository specified in `.spec.address`.
+The token must have at least the `write:repository` permission for the provider to 
+update the commit status for the Gitea repository specified in `.spec.address`.
+
+{{% alert color="info" title="Gitea 1.20.0 & 1.20.1" %}}
+Due to a bug in Gitea 1.20.0 and 1.20.1, these versions require the additional 
+`read:misc` scope to be applied to the token.
+{{% /alert %}}
 
 You can create the secret with `kubectl` like this:
 
@@ -1441,6 +1514,32 @@ You can create the secret with `kubectl` like this:
 ```shell
 kubectl create secret generic bitbucket-token --from-literal=token=<username>:<app-password>
 ```
+
+#### BitBucket Server/Data Center
+
+When `.spec.type` is set to `bitbucketserver`, the following auth methods are available:
+
+- Basic Authentication (username/password)
+- [HTTP access tokens](https://confluence.atlassian.com/bitbucketserver/http-access-tokens-939515499.html)
+
+For Basic Authentication, the referenced secret must contain a `password` field. The `username` field can either come from the [`.spec.username` field of the Provider](https://fluxcd.io/flux/components/notification/providers/#username) or can be defined in the referenced secret.
+
+You can create the secret with `kubectl` like this:
+
+```shell
+kubectl create secret generic bb-server-username-password --from-literal=username=<username> --from-literal=password=<password>
+```
+
+For HTTP access tokens, the secret can be created with `kubectl` like this:
+
+```shell
+kubectl create secret generic bb-server-token --from-literal=token=<token>
+```
+
+The HTTP access token must have `Repositories (Read/Write)` permission for
+the repository specified in `.spec.address`.
+
+**NOTE:** Please provide HTTPS clone URL in the `address` field of this provider. SSH URLs are not supported by this provider type.
 
 #### Azure DevOps
 
