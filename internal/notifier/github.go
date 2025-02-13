@@ -26,7 +26,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/google/go-github/v53/github"
+	"github.com/google/go-github/v64/github"
 	"golang.org/x/oauth2"
 
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
@@ -96,7 +96,7 @@ func (g *GitHub) Post(ctx context.Context, event eventv1.Event) error {
 		return nil
 	}
 
-	revString, ok := event.Metadata[eventv1.MetaRevisionKey]
+	revString, ok := event.GetRevision()
 	if !ok {
 		return errors.New("missing revision metadata")
 	}

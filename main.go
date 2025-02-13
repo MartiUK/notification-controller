@@ -35,6 +35,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	crtlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/fluxcd/pkg/runtime/acl"
 	"github.com/fluxcd/pkg/runtime/client"
@@ -42,11 +43,13 @@ import (
 	feathelper "github.com/fluxcd/pkg/runtime/features"
 	"github.com/fluxcd/pkg/runtime/leaderelection"
 	"github.com/fluxcd/pkg/runtime/logger"
+	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/pprof"
 	"github.com/fluxcd/pkg/runtime/probes"
 
 	apiv1 "github.com/fluxcd/notification-controller/api/v1"
 	apiv1b2 "github.com/fluxcd/notification-controller/api/v1beta2"
+	apiv1b3 "github.com/fluxcd/notification-controller/api/v1beta3"
 	"github.com/fluxcd/notification-controller/internal/controller"
 	"github.com/fluxcd/notification-controller/internal/features"
 	"github.com/fluxcd/notification-controller/internal/server"
@@ -65,6 +68,7 @@ func init() {
 
 	_ = apiv1.AddToScheme(scheme)
 	_ = apiv1b2.AddToScheme(scheme)
+	_ = apiv1b3.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -83,6 +87,7 @@ func main() {
 		aclOptions            acl.Options
 		rateLimiterOptions    helper.RateLimiterOptions
 		featureGates          feathelper.FeatureGates
+		exportHTTPPathMetrics bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
@@ -93,6 +98,7 @@ func main() {
 	flag.BoolVar(&watchAllNamespaces, "watch-all-namespaces", true,
 		"Watch for custom resources in all namespaces, if set to false it will only watch the runtime namespace.")
 	flag.DurationVar(&rateLimitInterval, "rate-limit-interval", 5*time.Minute, "Interval in which rate limit has effect.")
+	flag.BoolVar(&exportHTTPPathMetrics, "export-http-path-metrics", false, "When enabled, the requests full path is included in the HTTP server metrics (risk as high cardinality")
 
 	clientOptions.BindFlags(flag.CommandLine)
 	logOptions.BindFlags(flag.CommandLine)
@@ -126,9 +132,8 @@ func main() {
 	}
 
 	restConfig := client.GetConfigOrDie(clientOptions)
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+	mgrConfig := ctrl.Options{
 		Scheme:                        scheme,
-		MetricsBindAddress:            metricsAddr,
 		HealthProbeBindAddress:        healthAddr,
 		LeaderElection:                leaderElectionOptions.Enable,
 		LeaderElectionReleaseOnCancel: leaderElectionOptions.ReleaseOnCancel,
@@ -146,42 +151,48 @@ func main() {
 				DisableFor: disableCacheFor,
 			},
 		},
-		Cache: ctrlcache.Options{
-			Namespaces: []string{watchNamespace},
+		Metrics: metricsserver.Options{
+			BindAddress:   metricsAddr,
+			ExtraHandlers: pprof.GetHandlers(),
 		},
-	})
+	}
+
+	if watchNamespace != "" {
+		mgrConfig.Cache = ctrlcache.Options{
+			DefaultNamespaces: map[string]ctrlcache.Config{
+				watchNamespace: ctrlcache.Config{},
+			},
+		}
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, mgrConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
 	probes.SetupChecks(mgr, setupLog)
-	pprof.SetupHandlers(mgr, setupLog)
 
-	metricsH := helper.MustMakeMetrics(mgr)
+	metricsH := helper.NewMetrics(mgr, metrics.MustMakeRecorder(), apiv1.NotificationFinalizer)
 
 	if err = (&controller.ProviderReconciler{
 		Client:         mgr.GetClient(),
 		ControllerName: controllerName,
-		Metrics:        metricsH,
 		EventRecorder:  mgr.GetEventRecorderFor(controllerName),
-	}).SetupWithManagerAndOptions(mgr, controller.ProviderReconcilerOptions{
-		RateLimiter: helper.GetRateLimiter(rateLimiterOptions),
-	}); err != nil {
+	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
 	}
+
 	if err = (&controller.AlertReconciler{
 		Client:         mgr.GetClient(),
 		ControllerName: controllerName,
-		Metrics:        metricsH,
 		EventRecorder:  mgr.GetEventRecorderFor(controllerName),
-	}).SetupWithManagerAndOptions(mgr, controller.AlertReconcilerOptions{
-		RateLimiter: helper.GetRateLimiter(rateLimiterOptions),
-	}); err != nil {
+	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Alert")
 		os.Exit(1)
 	}
+
 	if err = (&controller.ReceiverReconciler{
 		Client:         mgr.GetClient(),
 		ControllerName: controllerName,
@@ -211,11 +222,11 @@ func main() {
 			Registry: crtlmetrics.Registry,
 		}),
 	})
-	eventServer := server.NewEventServer(eventsAddr, ctrl.Log, mgr.GetClient(), aclOptions.NoCrossNamespaceRefs)
+	eventServer := server.NewEventServer(eventsAddr, ctrl.Log, mgr.GetClient(), mgr.GetEventRecorderFor(controllerName), aclOptions.NoCrossNamespaceRefs, exportHTTPPathMetrics)
 	go eventServer.ListenAndServe(ctx.Done(), eventMdlw, store)
 
 	setupLog.Info("starting webhook receiver server", "addr", receiverAddr)
-	receiverServer := server.NewReceiverServer(receiverAddr, ctrl.Log, mgr.GetClient())
+	receiverServer := server.NewReceiverServer(receiverAddr, ctrl.Log, mgr.GetClient(), aclOptions.NoCrossNamespaceRefs, exportHTTPPathMetrics)
 	receiverMdlw := middleware.New(middleware.Config{
 		Recorder: prommetrics.NewRecorder(prommetrics.Config{
 			Prefix:   "gotk_receiver",

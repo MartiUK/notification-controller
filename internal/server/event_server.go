@@ -33,29 +33,38 @@ import (
 	"github.com/sethvargo/go-limiter/httplimit"
 	"github.com/slok/go-http-metrics/middleware"
 	"github.com/slok/go-http-metrics/middleware/std"
+	kuberecorder "k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
 )
 
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=notification.toolkit.fluxcd.io,resources=alerts,verbs=get;list
+// +kubebuilder:rbac:groups=notification.toolkit.fluxcd.io,resources=providers,verbs=get
+
 type eventContextKey struct{}
 
 // EventServer handles event POST requests
 type EventServer struct {
-	port                 string
-	logger               logr.Logger
-	kubeClient           client.Client
-	noCrossNamespaceRefs bool
+	port                  string
+	logger                logr.Logger
+	kubeClient            client.Client
+	noCrossNamespaceRefs  bool
+	exportHTTPPathMetrics bool
+	kuberecorder.EventRecorder
 }
 
 // NewEventServer returns an HTTP server that handles events
-func NewEventServer(port string, logger logr.Logger, kubeClient client.Client, noCrossNamespaceRefs bool) *EventServer {
+func NewEventServer(port string, logger logr.Logger, kubeClient client.Client, eventRecorder kuberecorder.EventRecorder, noCrossNamespaceRefs bool, exportHTTPPathMetrics bool) *EventServer {
 	return &EventServer{
-		port:                 port,
-		logger:               logger.WithName("event-server"),
-		kubeClient:           kubeClient,
-		noCrossNamespaceRefs: noCrossNamespaceRefs,
+		port:                  port,
+		logger:                logger.WithName("event-server"),
+		kubeClient:            kubeClient,
+		EventRecorder:         eventRecorder,
+		noCrossNamespaceRefs:  noCrossNamespaceRefs,
+		exportHTTPPathMetrics: exportHTTPPathMetrics,
 	}
 }
 
@@ -75,8 +84,13 @@ func (s *EventServer) ListenAndServe(stopCh <-chan struct{}, mdlw middleware.Mid
 		handler = middleware(handler)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", handler)
-	h := std.Handler("", mdlw, mux)
+	path := "/"
+	mux.Handle(path, handler)
+	handlerID := path
+	if s.exportHTTPPathMetrics {
+		handlerID = ""
+	}
+	h := std.Handler(handlerID, mdlw, mux)
 	srv := &http.Server{
 		Addr:    s.port,
 		Handler: h,
@@ -114,7 +128,11 @@ func (s *EventServer) eventMiddleware(h http.Handler) http.Handler {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		r.Body.Close()
+		if err := r.Body.Close(); err != nil {
+			s.logger.Error(err, "closing the request body failed")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		r.Body = io.NopCloser(bytes.NewBuffer(body))
 
 		event := &eventv1.Event{}
@@ -138,21 +156,23 @@ func (s *EventServer) eventMiddleware(h http.Handler) http.Handler {
 }
 
 // cleanupMetadata removes metadata entries which are not used for alerting.
+// In particular, it removes the checksum and digest metadata entries and
+// keeps only the metadata entries that are prefixed with either the event
+// group prefix or the involved object's group prefix.
 func cleanupMetadata(event *eventv1.Event) {
-	group := event.InvolvedObject.GetObjectKind().GroupVersionKind().Group
+	const eventGroupPrefix = eventv1.Group + "/"
+	objectGroupPrefix := event.InvolvedObject.GetObjectKind().GroupVersionKind().Group + "/"
 	excludeList := []string{
-		fmt.Sprintf("%s/%s", group, eventv1.MetaChecksumKey),
-		fmt.Sprintf("%s/%s", group, eventv1.MetaDigestKey),
+		fmt.Sprintf("%s%s", objectGroupPrefix, eventv1.MetaChecksumKey),
+		fmt.Sprintf("%s%s", objectGroupPrefix, eventv1.MetaDigestKey),
 	}
 
+	// Filter other meta based on group prefix, while filtering out excludes
 	meta := make(map[string]string)
-	if event.Metadata != nil && len(event.Metadata) > 0 {
-		// Filter other meta based on group prefix, while filtering out excludes
-		for key, val := range event.Metadata {
-			if strings.HasPrefix(key, group) && !inList(excludeList, key) {
-				newKey := strings.TrimPrefix(key, fmt.Sprintf("%s/", group))
-				meta[newKey] = val
-			}
+	for key, val := range event.Metadata {
+		if !inList(excludeList, key) &&
+			(strings.HasPrefix(key, eventGroupPrefix) || strings.HasPrefix(key, objectGroupPrefix)) {
+			meta[key] = val
 		}
 	}
 
@@ -211,12 +231,22 @@ func eventKeyFunc(r *http.Request) (string, error) {
 		"message=" + event.Message,
 	}
 
-	revision, ok := event.Metadata[eventv1.MetaRevisionKey]
+	objectGroup := event.InvolvedObject.GetObjectKind().GroupVersionKind().Group
+
+	originRevisionKey := fmt.Sprintf("%s/%s", objectGroup, eventv1.MetaOriginRevisionKey)
+	originRevision, ok := event.Metadata[originRevisionKey]
+	if ok {
+		comps = append(comps, "originRevision="+originRevision)
+	}
+
+	revisionKey := fmt.Sprintf("%s/%s", objectGroup, eventv1.MetaRevisionKey)
+	revision, ok := event.Metadata[revisionKey]
 	if ok {
 		comps = append(comps, "revision="+revision)
 	}
 
-	token, ok := event.Metadata[eventv1.MetaTokenKey]
+	tokenKey := fmt.Sprintf("%s/%s", objectGroup, eventv1.MetaTokenKey)
+	token, ok := event.Metadata[tokenKey]
 	if ok {
 		comps = append(comps, "token="+token)
 	}

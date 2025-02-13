@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The Flux authors
+Copyright 2023 The Flux authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,190 +17,103 @@ limitations under the License.
 package controller
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/fluxcd/pkg/runtime/patch"
 	. "github.com/onsi/gomega"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/fluxcd/pkg/apis/meta"
-	"github.com/fluxcd/pkg/runtime/conditions"
-	"github.com/fluxcd/pkg/runtime/patch"
-
 	apiv1 "github.com/fluxcd/notification-controller/api/v1"
-	apiv1beta2 "github.com/fluxcd/notification-controller/api/v1beta2"
+	apiv1beta3 "github.com/fluxcd/notification-controller/api/v1beta3"
 )
 
-func TestProviderReconciler_Reconcile(t *testing.T) {
+func TestProviderReconciler(t *testing.T) {
 	g := NewWithT(t)
-	timeout := 5 * time.Second
-	resultP := &apiv1beta2.Provider{}
-	namespaceName := "provider-" + randStringRunes(5)
-	secretName := "secret-" + randStringRunes(5)
 
-	g.Expect(createNamespace(namespaceName)).NotTo(HaveOccurred(), "failed to create test namespace")
+	timeout := 10 * time.Second
 
-	providerKey := types.NamespacedName{
-		Name:      fmt.Sprintf("provider-%s", randStringRunes(5)),
-		Namespace: namespaceName,
-	}
-	provider := &apiv1beta2.Provider{
+	testns, err := testEnv.CreateNamespace(ctx, "provider-test")
+	g.Expect(err).ToNot(HaveOccurred())
+
+	t.Cleanup(func() {
+		g.Expect(testEnv.Cleanup(ctx, testns)).ToNot(HaveOccurred())
+	})
+
+	provider := &apiv1beta3.Provider{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      providerKey.Name,
-			Namespace: providerKey.Namespace,
-		},
-		Spec: apiv1beta2.ProviderSpec{
-			Type:    "generic",
-			Address: "https://webhook.internal",
+			Name:      fmt.Sprintf("provider-%s", randStringRunes(5)),
+			Namespace: testns.Name,
 		},
 	}
-	g.Expect(k8sClient.Create(context.Background(), provider)).To(Succeed())
+	providerKey := client.ObjectKeyFromObject(provider)
 
-	t.Run("reports ready status", func(t *testing.T) {
-		g := NewWithT(t)
+	// Remove finalizer at create.
 
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return resultP.Status.ObservedGeneration == resultP.Generation
-		}, timeout, time.Second).Should(BeTrue())
+	provider.ObjectMeta.Finalizers = append(provider.ObjectMeta.Finalizers, "foo.bar", apiv1.NotificationFinalizer)
+	provider.Spec = apiv1beta3.ProviderSpec{
+		Type: "slack",
+	}
+	g.Expect(testEnv.Create(ctx, provider)).ToNot(HaveOccurred())
 
-		g.Expect(conditions.IsReady(resultP)).To(BeTrue())
-		g.Expect(conditions.GetReason(resultP, meta.ReadyCondition)).To(BeIdenticalTo(meta.SucceededReason))
+	g.Eventually(func() bool {
+		_ = testEnv.Get(ctx, providerKey, provider)
+		return !controllerutil.ContainsFinalizer(provider, apiv1.NotificationFinalizer)
+	}, timeout, time.Second).Should(BeTrue())
 
-		g.Expect(conditions.Has(resultP, meta.ReconcilingCondition)).To(BeFalse())
-		g.Expect(controllerutil.ContainsFinalizer(resultP, apiv1.NotificationFinalizer)).To(BeTrue())
-	})
+	// Remove finalizer at update.
 
-	t.Run("fails with secret not found error", func(t *testing.T) {
-		g := NewWithT(t)
+	patchHelper, err := patch.NewHelper(provider, testEnv.Client)
+	g.Expect(err).ToNot(HaveOccurred())
+	provider.ObjectMeta.Finalizers = append(provider.ObjectMeta.Finalizers, apiv1.NotificationFinalizer)
+	g.Expect(patchHelper.Patch(ctx, provider)).ToNot(HaveOccurred())
 
-		g.Expect(k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)).To(Succeed())
+	g.Eventually(func() bool {
+		_ = testEnv.Get(ctx, providerKey, provider)
+		return !controllerutil.ContainsFinalizer(provider, apiv1.NotificationFinalizer)
+	}, timeout, time.Second).Should(BeTrue())
 
-		resultP.Spec.SecretRef = &meta.LocalObjectReference{
-			Name: secretName,
-		}
-		g.Expect(k8sClient.Update(context.Background(), resultP)).To(Succeed())
+	// Remove finalizer at delete.
 
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return !conditions.IsReady(resultP)
-		}, timeout, time.Second).Should(BeTrue())
+	patchHelper, err = patch.NewHelper(provider, testEnv.Client)
+	g.Expect(err).ToNot(HaveOccurred())
 
-		g.Expect(conditions.GetReason(resultP, meta.ReadyCondition)).To(BeIdenticalTo(apiv1.ValidationFailedReason))
-		g.Expect(conditions.GetMessage(resultP, meta.ReadyCondition)).To(ContainSubstring(secretName))
+	// Suspend the provider to prevent finalizer from getting removed.
+	// Ensure only flux finalizer is set to allow the object to be garbage
+	// collected at the end.
+	// NOTE: Suspending and updating finalizers are done separately here as
+	// doing them in a single patch results in flaky test where the finalizer
+	// update doesn't gets registered with the kube-apiserver, resulting in
+	// timeout waiting for finalizer to appear on the object below.
+	provider.Spec.Suspend = true
+	g.Expect(patchHelper.Patch(ctx, provider)).ToNot(HaveOccurred())
+	g.Eventually(func() bool {
+		_ = k8sClient.Get(ctx, providerKey, provider)
+		return provider.Spec.Suspend == true
+	}, timeout).Should(BeTrue())
 
-		g.Expect(conditions.Has(resultP, meta.ReconcilingCondition)).To(BeTrue())
-		g.Expect(conditions.GetReason(resultP, meta.ReconcilingCondition)).To(BeIdenticalTo(meta.ProgressingWithRetryReason))
-		g.Expect(conditions.GetObservedGeneration(resultP, meta.ReconcilingCondition)).To(BeIdenticalTo(resultP.Generation))
-		g.Expect(resultP.Status.ObservedGeneration).To(BeIdenticalTo(resultP.Generation - 1))
-	})
+	patchHelper, err = patch.NewHelper(provider, testEnv.Client)
+	g.Expect(err).ToNot(HaveOccurred())
 
-	t.Run("recovers when secret exists", func(t *testing.T) {
-		g := NewWithT(t)
+	// Add finalizer and verify that finalizer exists on the object using a live
+	// client.
+	provider.ObjectMeta.Finalizers = []string{apiv1.NotificationFinalizer}
+	g.Expect(patchHelper.Patch(ctx, provider)).ToNot(HaveOccurred())
+	g.Eventually(func() bool {
+		_ = k8sClient.Get(ctx, providerKey, provider)
+		return controllerutil.ContainsFinalizer(provider, apiv1.NotificationFinalizer)
+	}, timeout).Should(BeTrue())
 
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      secretName,
-				Namespace: namespaceName,
-			},
-			StringData: map[string]string{
-				"token": "test",
-			},
-		}
-		g.Expect(k8sClient.Create(context.Background(), secret)).To(Succeed())
-
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return conditions.IsReady(resultP)
-		}, timeout, time.Second).Should(BeTrue())
-
-		g.Expect(conditions.GetObservedGeneration(resultP, meta.ReadyCondition)).To(BeIdenticalTo(resultP.Generation))
-		g.Expect(resultP.Status.ObservedGeneration).To(BeIdenticalTo(resultP.Generation))
-		g.Expect(conditions.Has(resultP, meta.ReconcilingCondition)).To(BeFalse())
-	})
-
-	t.Run("handles reconcileAt", func(t *testing.T) {
-		g := NewWithT(t)
-
-		g.Expect(k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)).To(Succeed())
-
-		reconcileRequestAt := metav1.Now().String()
-		resultP.SetAnnotations(map[string]string{
-			meta.ReconcileRequestAnnotation: reconcileRequestAt,
-		})
-		g.Expect(k8sClient.Update(context.Background(), resultP)).To(Succeed())
-
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return resultP.Status.LastHandledReconcileAt == reconcileRequestAt
-		}, timeout, time.Second).Should(BeTrue())
-	})
-
-	t.Run("becomes stalled on invalid proxy", func(t *testing.T) {
-		g := NewWithT(t)
-
-		g.Expect(k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)).To(Succeed())
-
-		resultP.Spec.SecretRef = nil
-		resultP.Spec.Proxy = "https://proxy.internal|"
-		g.Expect(k8sClient.Update(context.Background(), resultP)).To(Succeed())
-
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return !conditions.IsReady(resultP)
-		}, timeout, time.Second).Should(BeTrue())
-
-		g.Expect(conditions.Has(resultP, meta.ReconcilingCondition)).To(BeFalse())
-		g.Expect(conditions.Has(resultP, meta.StalledCondition)).To(BeTrue())
-		g.Expect(conditions.GetObservedGeneration(resultP, meta.StalledCondition)).To(BeIdenticalTo(resultP.Generation))
-		g.Expect(conditions.GetReason(resultP, meta.StalledCondition)).To(BeIdenticalTo(meta.InvalidURLReason))
-		g.Expect(conditions.GetReason(resultP, meta.ReadyCondition)).To(BeIdenticalTo(meta.InvalidURLReason))
-	})
-
-	t.Run("recovers from staleness", func(t *testing.T) {
-		g := NewWithT(t)
-
-		g.Expect(k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)).To(Succeed())
-
-		resultP.Spec.Proxy = "https://proxy.internal"
-		g.Expect(k8sClient.Update(context.Background(), resultP)).To(Succeed())
-
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return conditions.IsReady(resultP)
-		}, timeout, time.Second).Should(BeTrue())
-
-		g.Expect(conditions.Has(resultP, meta.ReconcilingCondition)).To(BeFalse())
-		g.Expect(conditions.Has(resultP, meta.StalledCondition)).To(BeFalse())
-	})
-
-	t.Run("finalizes suspended object", func(t *testing.T) {
-		g := NewWithT(t)
-
-		g.Expect(k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)).To(Succeed())
-
-		patchHelper, err := patch.NewHelper(resultP, k8sClient)
-		g.Expect(err).ToNot(HaveOccurred())
-		resultP.Spec.Suspend = true
-		g.Expect(patchHelper.Patch(context.Background(), resultP)).ToNot(HaveOccurred())
-
-		g.Eventually(func() bool {
-			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
-			return resultP.Spec.Suspend == true
-		}, timeout, time.Second).Should(BeTrue())
-
-		g.Expect(k8sClient.Delete(context.Background(), resultP)).To(Succeed())
-
-		g.Eventually(func() bool {
-			err := k8sClient.Get(context.Background(), client.ObjectKeyFromObject(provider), resultP)
+	// Delete the object and verify.
+	g.Expect(testEnv.Delete(ctx, provider)).ToNot(HaveOccurred())
+	g.Eventually(func() bool {
+		if err := testEnv.Get(ctx, providerKey, provider); err != nil {
 			return apierrors.IsNotFound(err)
-		}, timeout, time.Second).Should(BeTrue())
-	})
+		}
+		return false
+	}, timeout).Should(BeTrue())
 }

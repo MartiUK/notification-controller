@@ -26,8 +26,8 @@ import (
 
 	"github.com/fluxcd/pkg/git"
 
+	giturls "github.com/chainguard-dev/git-urls"
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
-	giturls "github.com/whilp/git-urls"
 )
 
 func parseGitAddress(s string) (string, string, error) {
@@ -124,4 +124,12 @@ func sha1String(str string) string {
 func basicAuth(username, password string) string {
 	auth := username + ":" + password
 	return base64.StdEncoding.EncodeToString([]byte(auth))
+}
+
+func strPtr(s string) *string {
+	return &s
+}
+
+func int64Ptr(i int64) *int64 {
+	return &i
 }

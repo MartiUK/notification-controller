@@ -36,7 +36,7 @@ type Grafana struct {
 	Password string
 }
 
-// GraphiteAnnotation represents a Grafana API annotation in Graphite format
+// GraphitePayload represents a Grafana API annotation in Graphite format
 type GraphitePayload struct {
 	When int64    `json:"when"` //optional unix timestamp (ms)
 	Text string   `json:"text"`
@@ -71,8 +71,13 @@ func (g *Grafana) Post(ctx context.Context, event eventv1.Event) error {
 	// add tag to filter on grafana
 	sfields = append(sfields, "flux", event.ReportingController)
 	for k, v := range event.Metadata {
-		sfields = append(sfields, fmt.Sprintf("%s: %s", k, v))
+		key := strings.ReplaceAll(k, ":", "|")
+		value := strings.ReplaceAll(v, ":", "|")
+		sfields = append(sfields, fmt.Sprintf("%s: %s", key, value))
 	}
+	sfields = append(sfields, fmt.Sprintf("kind: %s", event.InvolvedObject.Kind))
+	sfields = append(sfields, fmt.Sprintf("name: %s", event.InvolvedObject.Name))
+	sfields = append(sfields, fmt.Sprintf("namespace: %s", event.InvolvedObject.Namespace))
 	payload := GraphitePayload{
 		When: event.Timestamp.Unix(),
 		Text: fmt.Sprintf("%s/%s.%s", strings.ToLower(event.InvolvedObject.Kind), event.InvolvedObject.Name, event.InvolvedObject.Namespace),

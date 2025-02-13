@@ -7,7 +7,7 @@ on:
     inputs:
       tag:
         description: 'image tag prefix'
-        default: 'rc'
+        default: 'preview'
         required: true
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
       packages: write # for pushing and signing container images.
     steps:
       - name: Checkout
-        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Kustomize
         uses: fluxcd/pkg/actions/kustomize@main
       - name: Prepare
@@ -42,24 +42,24 @@ jobs:
           echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@2b82ce82d56a2a04d2637cd93a637ae1b359c0a7 # v2.2.0
+        uses: docker/setup-qemu-action@4574d27a4764455b42196d70a065bc6853246a25 # v3.4.0
       - name: Setup Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@16c0bc4a6e6ada2cfd8afd41d22d95379cf7c32a # v2.8.0
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc # v2.2.0
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           registry: ghcr.io
           username: fluxcdbot
           password: ${{ secrets.GHCR_TOKEN }}
       - name: Login to Docker Hub
-        uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc # v2.2.0
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           username: fluxcdbot
           password: ${{ secrets.DOCKER_FLUXCD_PASSWORD }}
       - name: Generate images meta
         id: meta
-        uses: docker/metadata-action@818d4b7b91585d195f67373fd9cb0332e31a7175 # v4.6.0
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
         with:
           images: |
             fluxcd/${{ env.CONTROLLER }}
@@ -68,7 +68,7 @@ jobs:
             type=raw,value=${{ steps.prep.outputs.VERSION }}
       - name: Publish images
         id: build-push
-        uses: docker/build-push-action@2eb1c1961a95fc15694676618e422e8ba1d63825 # v4.1.1
+        uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991 # v6.13.0
         with:
           sbom: true
           provenance: true
@@ -79,7 +79,7 @@ jobs:
           platforms: linux/amd64,linux/arm/v7,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-      - uses: sigstore/cosign-installer@6e04d228eb30da1757ee4e1dd75a0ec73a653e06 # v3.1.1
+      - uses: sigstore/cosign-installer@c56c2d3e59e4281cc41dea2217323ba5694b171e # v3.8.0
       - name: Sign images
         env:
           COSIGN_EXPERIMENTAL: 1
@@ -92,14 +92,14 @@ jobs:
           mkdir -p config/release
           kustomize build ./config/crd > ./config/release/${{ env.CONTROLLER }}.crds.yaml
           kustomize build ./config/manager > ./config/release/${{ env.CONTROLLER }}.deployment.yaml
-      - uses: anchore/sbom-action/download-syft@78fc58e266e87a38d4194b2137a3d4e9bcaf7ca1 # v0.14.3
+      - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
       - name: Create release and SBOM
         id: run-goreleaser
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: goreleaser/goreleaser-action@336e29918d653399e599bfca99fadc1d7ffbc9f7 # v4.3.0
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
         with:
           version: latest
-          args: release --clean --skip-validate
+          args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate SLSA metadata
@@ -107,12 +107,12 @@ jobs:
         env:
           ARTIFACTS: "${{ steps.run-goreleaser.outputs.artifacts }}"
         run: |
-          hashes=$(echo $ARTIFACTS | jq --raw-output '.[] | {name, "digest": (.extra.Digest // .extra.Checksum)} | select(.digest) | {digest} + {name} | join("  ") | sub("^sha256:";"")' | base64 -w0)
+          hashes=$(echo -E $ARTIFACTS | jq --raw-output '.[] | {name, "digest": (.extra.Digest // .extra.Checksum)} | select(.digest) | {digest} + {name} | join("  ") | sub("^sha256:";"")' | base64 -w0)
           echo "hashes=$hashes" >> $GITHUB_OUTPUT
-          
+
           image_url=fluxcd/${{ env.CONTROLLER }}:${{ steps.prep.outputs.version }}
           echo "image_url=$image_url" >> $GITHUB_OUTPUT
-          
+
           image_digest=${{ steps.build-push.outputs.digest }}
           echo "image_digest=$image_digest" >> $GITHUB_OUTPUT
 
@@ -123,7 +123,7 @@ jobs:
       id-token: write # for creating OIDC tokens for signing.
       contents: write # for uploading attestations to GitHub releases.
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.7.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
     with:
       provenance-name: "provenance.intoto.jsonl"
       base64-subjects: "${{ needs.release.outputs.hashes }}"
@@ -136,7 +136,7 @@ jobs:
       id-token: write # for creating OIDC tokens for signing.
       packages: write # for uploading attestations.
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.7.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
     with:
       image: ${{ needs.release.outputs.image_url }}
       digest: ${{ needs.release.outputs.image_digest }}
@@ -151,7 +151,7 @@ jobs:
       id-token: write # for creating OIDC tokens for signing.
       packages: write # for uploading attestations.
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.7.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
     with:
       image: ghcr.io/${{ needs.release.outputs.image_url }}
       digest: ${{ needs.release.outputs.image_digest }}

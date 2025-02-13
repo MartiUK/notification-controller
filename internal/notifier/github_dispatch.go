@@ -29,7 +29,7 @@ import (
 
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
 
-	"github.com/google/go-github/v53/github"
+	"github.com/google/go-github/v64/github"
 	"golang.org/x/oauth2"
 )
 
@@ -99,7 +99,7 @@ func (g *GitHubDispatch) Post(ctx context.Context, event eventv1.Event) error {
 
 	eventData, err := json.Marshal(event)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal object into json: %w", err)
+		return fmt.Errorf("failed to marshal object into json: %w", err)
 	}
 	eventDataRaw := json.RawMessage(eventData)
 
@@ -110,7 +110,7 @@ func (g *GitHubDispatch) Post(ctx context.Context, event eventv1.Event) error {
 	_, _, err = g.Client.Repositories.Dispatch(ctx, g.Owner, g.Repo, opts)
 
 	if err != nil {
-		return fmt.Errorf("Could not send github repository dispatch webhook: %v", err)
+		return fmt.Errorf("could not send github repository dispatch webhook: %v", err)
 	}
 
 	return nil
